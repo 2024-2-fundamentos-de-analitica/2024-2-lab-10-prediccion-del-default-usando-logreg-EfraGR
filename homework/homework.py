@@ -95,3 +95,142 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import os
+import gzip
+import pandas as pd
+import numpy as np
+import pickle
+import json
+
+from sklearn.compose import ColumnTransformer
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import precision_score
+from sklearn.metrics import recall_score
+from sklearn.metrics import f1_score
+from sklearn.metrics import balanced_accuracy_score
+from sklearn.metrics import confusion_matrix
+def cargar_datos(ruta: str) -> pd.DataFrame:
+    return pd.read_csv(ruta, index_col=False, compression='zip')
+
+
+def limpiar_datos(df: pd.DataFrame) -> pd.DataFrame:
+    datos_nuevos = df.copy()
+    datos_nuevos = datos_nuevos.rename(columns={'default payment next month': 'default'})
+    datos_nuevos = datos_nuevos.drop(columns=['ID'])
+    datos_nuevos = datos_nuevos.loc[datos_nuevos["MARRIAGE"] != 0]
+    datos_nuevos = datos_nuevos.loc[datos_nuevos["EDUCATION"] != 0]
+    datos_nuevos["EDUCATION"] = datos_nuevos["EDUCATION"].apply(lambda x: x if x < 4 else 4)
+    return datos_nuevos
+
+
+def crear_pipeline(datos: pd.DataFrame) -> Pipeline:
+    caracteristicas_categoricas = ["SEX", "EDUCATION", "MARRIAGE"]
+    caracteristicas_numericas = list(set(datos) - set(caracteristicas_categoricas))
+    preprocesador = ColumnTransformer(
+        transformers=[
+            ("num", MinMaxScaler(), caracteristicas_numericas),
+            ('cat', OneHotEncoder(handle_unknown='ignore'), caracteristicas_categoricas)
+        ],
+        remainder='passthrough'
+    )
+
+    return Pipeline(
+        steps=[
+            ('preprocessor', preprocesador), 
+            ("k_best", SelectKBest(f_classif)),
+            ("model", LogisticRegression(random_state=42))
+        ]
+    )
+
+
+def crear_estimador(tuberia: Pipeline, datos: pd.DataFrame) -> GridSearchCV:
+    parametros_grid = {
+        "k_best__k": range(1, len(datos.columns) + 1),
+        "model__C": np.logspace(-3, 3, 7)
+    }
+
+    return GridSearchCV(
+        tuberia,
+        parametros_grid,
+        cv=10,
+        scoring='balanced_accuracy',
+        n_jobs=-1,
+        verbose=2,
+        refit=True
+    )
+
+
+def guardar_modelo(ruta: str, estimador: GridSearchCV):
+    with gzip.open(ruta, 'wb') as archivo:
+        pickle.dump(estimador, archivo)
+
+
+def calcular_metricas_precision(nombre_dataset: str, y, y_pred) -> dict: 
+    return {
+        'type': 'metrics',
+        'dataset': nombre_dataset,
+        'precision': precision_score(y, y_pred, zero_division=0),
+        'balanced_accuracy': balanced_accuracy_score(y, y_pred),
+        'recall': recall_score(y, y_pred, zero_division=0),
+        'f1_score': f1_score(y, y_pred, zero_division=0)
+    }
+
+
+def calcular_metricas_confusion(nombre_dataset: str, y, y_pred) -> dict:
+    matriz_confusion = confusion_matrix(y, y_pred)
+    return {
+        'type': 'cm_matrix',
+        'dataset': nombre_dataset,
+        'true_0': {"predicted_0": int(matriz_confusion[0][0]), "predicted_1": int(matriz_confusion[0][1])},
+        'true_1': {"predicted_0": int(matriz_confusion[1][0]), "predicted_1": int(matriz_confusion[1][1])}
+    }
+    
+    
+def main():
+    ruta_entrada = "./files/input/"
+    ruta_modelos = "./files/models/"
+
+    datos_prueba = cargar_datos(os.path.join(ruta_entrada, 'test_data.csv.zip'))
+    datos_entrenamiento = cargar_datos(os.path.join(ruta_entrada, 'train_data.csv.zip'))
+    datos_prueba = limpiar_datos(datos_prueba)
+    datos_entrenamiento = limpiar_datos(datos_entrenamiento)
+    x_prueba = datos_prueba.drop(columns=['default'])
+    y_prueba = datos_prueba['default']
+    x_entrenamiento = datos_entrenamiento.drop(columns=['default'])
+    y_entrenamiento = datos_entrenamiento['default']
+    tuberia = crear_pipeline(x_entrenamiento)
+    estimador = crear_estimador(tuberia, x_entrenamiento)
+    estimador.fit(x_entrenamiento, y_entrenamiento)
+    guardar_modelo(
+        os.path.join(ruta_modelos, 'model.pkl.gz'),
+        estimador,
+    )
+    y_prueba_pred = estimador.predict(x_prueba)
+    metricas_precision_prueba = calcular_metricas_precision(
+        'test',
+        y_prueba,
+        y_prueba_pred
+    )
+    y_entrenamiento_pred = estimador.predict(x_entrenamiento)
+    metricas_precision_entrenamiento = calcular_metricas_precision(
+        'train',
+        y_entrenamiento,
+        y_entrenamiento_pred
+    )
+    metricas_confusion_prueba = calcular_metricas_confusion('test', y_prueba, y_prueba_pred)
+    metricas_confusion_entrenamiento = calcular_metricas_confusion('train', y_entrenamiento, y_entrenamiento_pred)
+
+    with open('files/output/metrics.json', 'w') as archivo:
+        archivo.write(json.dumps(metricas_precision_entrenamiento)+'\n')
+        archivo.write(json.dumps(metricas_precision_prueba)+'\n')
+        archivo.write(json.dumps(metricas_confusion_entrenamiento)+'\n')
+        archivo.write(json.dumps(metricas_confusion_prueba)+'\n')
+
+
+if __name__ == "__main__":
+    main()
